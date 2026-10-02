@@ -1,4 +1,5 @@
 *
 !keys/wireshark-release.gpg
 !licenses
+!runtime-deps.alpine
 !runtime-deps.ubuntu
