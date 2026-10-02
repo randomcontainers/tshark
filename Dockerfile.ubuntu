@@ -1,0 +1,196 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS source
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gpgv xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://www.wireshark.org/download/src/all-versions/wireshark-${VERSION}.tar.xz /src/
+ADD https://www.wireshark.org/download/src/all-versions/SIGNATURES-${VERSION}.txt /src/
+# Gerald Combs's release signing key, fingerprint 5A5A DBA7 DBEA 6C3F 8722 4F19 8224 4A78 E6FE AEEA
+# Wireshark signs a list of hashes, not the tarball. The hash is looked up in
+# the text that gpgv writes out, which holds only the signed lines.
+COPY keys/wireshark-release.gpg /tmp/wireshark-release.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/wireshark-release.gpg --output /tmp/signatures "SIGNATURES-${VERSION}.txt"; \
+    tr -d '\r' < /tmp/signatures > /tmp/signatures.lf; \
+    grep -Fqx "SHA256(wireshark-${VERSION}.tar.xz)=${SOURCE_SHA256}" /tmp/signatures.lf \
+      || { echo "SIGNATURES-${VERSION}.txt does not list wireshark-${VERSION}.tar.xz with SHA-256 ${SOURCE_SHA256}" >&2; exit 1; }; \
+    mkdir wireshark; \
+    tar -xJf "wireshark-${VERSION}.tar.xz" -C wireshark --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+# The base image's packages are recorded before anything is installed, so that
+# runtime-deps can leave them out. Every image that installs runtime-deps is
+# built on the same base.
+RUN dpkg-query -W -f '${Package}\n' | LC_ALL=C sort -u > /tmp/base-packages \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      flex \
+      libbrotli-dev \
+      libc-ares-dev \
+      libcap-dev \
+      libgcrypt20-dev \
+      libglib2.0-dev \
+      libgnutls28-dev \
+      libkrb5-dev \
+      liblua5.4-dev \
+      liblz4-dev \
+      libnghttp2-dev \
+      libnghttp3-dev \
+      libpcap0.8-dev \
+      libpcre2-dev \
+      libsnappy-dev \
+      libxml2-dev \
+      libxxhash-dev \
+      libzstd-dev \
+      ninja-build \
+      pkgconf \
+      python3 \
+      zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY --link --from=source /src/wireshark /src/wireshark
+WORKDIR /src/wireshark
+ARG JOBS
+# Only the command-line programs are built: no Qt GUI, sharkd, mmdbresolve or
+# extcap helpers. Libraries the image does not use are turned off, since CMake
+# links each one it finds. The release flags lose -g because the binaries are
+# stripped. dumpcap is installed without setuid and without file capabilities.
+RUN set -eu; \
+    set -- \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -DNDEBUG" \
+      "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -DNDEBUG" \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DBUILD_wireshark=OFF \
+      -DBUILD_stratoshark=OFF \
+      -DBUILD_sharkd=OFF \
+      -DBUILD_mmdbresolve=OFF \
+      -DBUILD_dcerpcidl2wrs=OFF \
+      -DBUILD_androiddump=OFF \
+      -DBUILD_sshdump=OFF \
+      -DBUILD_ciscodump=OFF \
+      -DBUILD_wifidump=OFF \
+      -DBUILD_dpauxmon=OFF \
+      -DBUILD_randpktdump=OFF \
+      -DBUILD_udpdump=OFF \
+      -DBUILD_sdjournal=OFF \
+      -DENABLE_LUA=ON \
+      -DENABLE_GNUTLS=ON \
+      -DENABLE_KERBEROS=ON \
+      -DENABLE_ZLIBNG=OFF \
+      -DENABLE_SMI=OFF \
+      -DENABLE_NETLINK=OFF \
+      -DENABLE_SINSP=OFF \
+      -DENABLE_SBC=OFF \
+      -DENABLE_SPANDSP=OFF \
+      -DENABLE_BCG729=OFF \
+      -DENABLE_AMRNB=OFF \
+      -DENABLE_ILBC=OFF \
+      -DENABLE_OPUS=OFF \
+      -DENABLE_MINIZIP=OFF \
+      -DENABLE_MINIZIPNG=OFF; \
+    echo "cmake: $*" > /tmp/cmake-options; \
+    cmake -S . -B /build "$@" 2>&1 | tee /tmp/cmake.log; \
+    cmake --build /build -j"${JOBS:-$(nproc)}"; \
+    DESTDIR=/out cmake --install /build --strip; \
+    rm -rf /out/usr/local/include /out/usr/local/lib/cmake /out/usr/local/lib/pkgconfig /out/usr/local/share/doc /out/usr/local/share/man
+
+ARG BASE_IMAGE
+ARG VERSION
+# CMake leaves out an optional library it cannot find without an error, so
+# tshark's feature list is checked for each one the image is meant to have.
+# The programs find libwireshark through their RUNPATH, $ORIGIN/../lib.
+# runtime-deps lists the packages that own the libraries the programs and
+# plugins load, minus the base image's packages, plus the packages in
+# runtime-deps.ubuntu.
+# NOTICES keeps the first comment with a copyright line from each source file.
+# Many files name their license only by SPDX identifier, and licenses/ holds
+# the texts of those licenses that the tarball lacks.
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    --mount=type=bind,source=licenses,target=/tmp/licenses.extra \
+    set -eu; \
+    /out/usr/local/bin/tshark --version > /tmp/tshark-version; \
+    case "$(head -n 1 /tmp/tshark-version)" in \
+      "TShark (Wireshark) ${VERSION} "*|"TShark (Wireshark) ${VERSION}.") ;; \
+      *) cat /tmp/tshark-version >&2; echo "tshark is not version ${VERSION}" >&2; exit 1 ;; \
+    esac; \
+    tr '\n' ' ' < /tmp/tshark-version | tr -s ' ' > /tmp/features; \
+    missing=; \
+    for f in libpcap 'POSIX capabilities' 'Lua 5.4' GnuTLS Gcrypt 'Kerberos (MIT)' nghttp2 nghttp3 \
+        brotli LZ4 Zstandard Snappy libxml2 zlib xxhash PCRE2 c-ares; do \
+      grep -Fq "+$f" /tmp/features || missing="$missing, $f"; \
+    done; \
+    if [ -n "$missing" ]; then cat /tmp/tshark-version >&2; echo "missing: ${missing#, }" >&2; exit 1; fi; \
+    for f in /out/usr/local/bin/*; do \
+      readelf -d "$f" > /tmp/dynamic; \
+      awk '/\((RPATH|RUNPATH)\)/ { r = $NF } END { exit (index(r, "[$ORIGIN/../lib") != 1) }' /tmp/dynamic \
+        || { cat /tmp/dynamic >&2; echo "$f does not look for libraries in ../lib first" >&2; exit 1; }; \
+    done; \
+    meta=/out/usr/local/share/randomcontainers/tshark; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYING "$meta/licenses/"; \
+    cp epan/wslua/lrexlib/LICENSE "$meta/licenses/LICENSE.lrexlib"; \
+    cp epan/dissectors/pidl/IDL_LICENSE.txt "$meta/licenses/LICENSE.pidl"; \
+    cp /tmp/licenses.extra/* "$meta/licenses/"; \
+    find . -name '*.[ch]' | sed 's|^\./||' | LC_ALL=C sort > /tmp/sources; \
+    while read -r f; do \
+      awk 'NR == 1 && /^\/\/.*[Cc]opyright/ { print; exit } /\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /[Cc]opyright|COPYRIGHT/) { printf "%s", b; exit } }' \
+        "$f" > /tmp/notice; \
+      if [ -s /tmp/notice ]; then printf '%s:\n\n' "$f"; cat /tmp/notice; echo; fi; \
+    done < /tmp/sources > "$meta/licenses/NOTICES"; \
+    grep -Fqx 'epan/except.c:' "$meta/licenses/NOTICES"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://www.wireshark.org/download/src/all-versions/wireshark-${VERSION}.tar.xz" \
+      "https://www.wireshark.org/download/src/all-versions/SIGNATURES-${VERSION}.txt" \
+      "https://github.com/randomcontainers/tshark/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | head -n 1)"; \
+      cat /tmp/cmake-options; \
+      sed -n 's/^-- \(C-Flags: .*\)/\1/p' /tmp/cmake.log; \
+      echo; \
+      awk '/^-- The following/ { p = 1 } /^-- Configuring done/ { p = 0 } p' /tmp/cmake.log; \
+      cat /tmp/tshark-version; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 env LD_LIBRARY_PATH=/out/usr/local/lib ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | LC_ALL=C sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | LC_ALL=C sort -u | LC_ALL=C comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    LC_ALL=C sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+COPY --link --from=build /out/usr/local/ /usr/local/
+# The plugins have no RUNPATH; they find libwireshark through the cache that
+# ldconfig writes.
+RUN set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/tshark/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "tshark"]
+CMD ["--help"]
