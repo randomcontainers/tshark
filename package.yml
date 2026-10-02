@@ -1,0 +1,187 @@
+name: tshark
+title: TShark (Wireshark command-line tools)
+summary: Decodes, filters and converts packet captures with Wireshark's dissectors and captures live traffic. Built from the verified Wireshark source release.
+homepage: https://www.wireshark.org/
+# Most of Wireshark is GPL-2.0-or-later. The other terms come from files that
+# are compiled in: the SPDX tags of the C sources, Kaz Kylheku's exception
+# code (Kazlib), safe-math.h (CC0-1.0) and David M. Gay's dtoa. The 802.11
+# decryption code (BSD-3-Clause OR GPL-2.0-only) and the radiotap iterator
+# (ISC OR GPL-2.0-only) are used under BSD-3-Clause and ISC. LibTomCrypt's
+# SOBER-128, which is public domain, and Sun's G.711 code, released for
+# unrestricted use, add no term.
+license: GPL-2.0-or-later AND BSD-1-Clause AND BSD-2-Clause AND BSD-3-Clause AND CC0-1.0 AND ISC AND Kazlib AND LGPL-2.1-or-later AND MIT AND Zlib AND dtoa
+source-release: true
+upstream:
+  source: html-index
+  url: https://www.wireshark.org/download/src/
+  # Stable releases have an even minor version, so the 4.7 development series
+  # and wireshark-latest do not match. The index has no time zone, so the
+  # tarball's Last-Modified header is the release date.
+  pattern: 'href="wireshark-(\d+\.\d*[02468]\.\d+)\.tar\.xz"'
+  versioning: semver
+  version: 4.6.9
+  artifact:
+    url: https://www.wireshark.org/download/src/all-versions/wireshark-{version}.tar.xz
+    # SIGNATURES is a clearsigned list of hashes; Wireshark signs no tarball
+    # on its own.
+    checksums:
+      url: https://www.wireshark.org/download/src/all-versions/SIGNATURES-{version}.txt
+      algorithm: sha256
+    signature: https://www.wireshark.org/download/src/all-versions/SIGNATURES-{version}.txt
+    sha256: d062d416a1ab3a49975aafe3a671c882dde0562ccd71b078808ceb59d465fc0f
+image:
+  entrypoint: [tshark]
+  cmd: [--help]
+test:
+  - |
+    tshark --version > version.txt
+    case "$(head -n 1 version.txt)" in
+      "TShark (Wireshark) $VERSION "*|"TShark (Wireshark) $VERSION.") ;;
+      *) echo "unexpected version line:" >&2; head -n 1 version.txt >&2; exit 1 ;;
+    esac
+    # CMake leaves out a library it cannot find without an error. The feature
+    # lists are wrapped at 80 columns, so they are joined into one line first.
+    tr '\n' ' ' < version.txt | tr -s ' ' > features.txt
+    for f in libpcap 'POSIX capabilities' 'Lua 5.4' GnuTLS Gcrypt 'Kerberos (MIT)' nghttp2 nghttp3 \
+        brotli LZ4 Zstandard Snappy libxml2 zlib xxhash PCRE2 c-ares; do
+      grep -Fq "+$f" features.txt || { echo "tshark is built without $f" >&2; cat version.txt >&2; exit 1; }
+    done
+    for tool in dumpcap capinfos captype editcap mergecap randpkt rawshark reordercap text2pcap; do
+      "$tool" --version > "$tool-version.txt"
+      case "$(head -n 1 "$tool-version.txt")" in
+        *" (Wireshark) $VERSION "*|*" (Wireshark) $VERSION.") ;;
+        *) echo "unexpected $tool version line:" >&2; head -n 1 "$tool-version.txt" >&2; exit 1 ;;
+      esac
+    done
+  - |
+    # Wireshark finds its data files and plugins relative to /usr/local/bin.
+    tshark -G folders > folders.txt
+    printf '%-21s\t%s\n' \
+      'Global configuration:' /usr/local/share/wireshark \
+      'Global Plugins:' "/usr/local/lib/wireshark/plugins/${VERSION%.*}" > expected.txt
+    grep -E '^Global (configuration|Plugins):' folders.txt > got.txt || true
+    cmp -s expected.txt got.txt || { echo "expected:" >&2; cat expected.txt >&2; echo "got:" >&2; cat folders.txt >&2; exit 1; }
+    tshark -G plugins > plugins.txt
+    awk -F '\t' -v path="/usr/local/lib/wireshark/plugins/${VERSION%.*}/epan/mate.so" \
+      '$NF == path { found = 1 } END { exit !found }' plugins.txt \
+      || { echo "the MATE plugin is not loaded" >&2; cat plugins.txt >&2; exit 1; }
+  - |
+    # Three packets from 10.0.0.1 to 10.0.0.2 with valid checksums: an ICMP
+    # echo request, a TCP SYN to port 80 and a DNS query for example.org.
+    {
+      # pcap file header, Ethernet
+      printf '\324\303\262\241\002\000\004\000\000\000\000\000\000\000\000\000\377\377\000\000'
+      printf '\001\000\000\000'
+      # ICMP echo request
+      printf '\000\271\125\151\000\000\000\000\056\000\000\000\056\000\000\000'
+      printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+      printf '\105\000\000\040\000\001\100\000\100\001\046\332\012\000\000\001\012\000\000\002'
+      printf '\010\000\006\372\022\064\000\001\160\151\156\147'
+      # TCP SYN to port 80
+      printf '\001\271\125\151\000\000\000\000\066\000\000\000\066\000\000\000'
+      printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+      printf '\105\000\000\050\000\002\100\000\100\006\046\314\012\000\000\001\012\000\000\002'
+      printf '\234\100\000\120\000\000\003\350\000\000\000\000\120\002\372\360\000\167\000\000'
+      # DNS query for example.org
+      printf '\002\271\125\151\000\000\000\000\107\000\000\000\107\000\000\000'
+      printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+      printf '\105\000\000\071\000\003\100\000\100\021\046\257\012\000\000\001\012\000\000\002'
+      printf '\317\010\000\065\000\045\067\274\022\064\001\000\000\001\000\000\000\000\000\000'
+      printf '\007\145\170\141\155\160\154\145\003\157\162\147\000\000\001\000\001'
+    } > sample.pcap
+    tshark -r sample.pcap -Y 'dns.qry.name == "example.org"' -T fields -e ip.src -e dns.qry.name > dns.txt
+    printf '10.0.0.1\texample.org\n' > expected.txt
+    cmp -s expected.txt dns.txt || { echo "expected:" >&2; cat expected.txt >&2; echo "got:" >&2; cat dns.txt >&2; exit 1; }
+    tshark -r sample.pcap -T json > packets.json
+    grep -Fq '"icmp.type": "8"' packets.json || { echo "no ICMP echo request in the JSON output" >&2; exit 1; }
+    tshark -r sample.pcap -T ek > packets.ek
+    test "$(grep -c '"layers"' packets.ek)" -eq 3 || { cat packets.ek >&2; exit 1; }
+    tshark -r sample.pcap -q -z conv,ip > conv.txt
+    grep -Fqx 'IPv4 Conversations' conv.txt || { cat conv.txt >&2; exit 1; }
+    # One conversation, 3 frames in total (the tenth column).
+    awk '$2 == "<->" { n++; frames = $10 } END { exit !(n == 1 && frames == 3) }' conv.txt || { cat conv.txt >&2; exit 1; }
+  - |
+    cat > frames.lua <<'EOF'
+    local frames = 0
+    local tap = Listener.new("frame")
+    function tap.packet() frames = frames + 1 end
+    function tap.draw() print(string.format("frames=%d %s", frames, _VERSION)) end
+    EOF
+    tshark -q -r sample.pcap -X lua_script:frames.lua > lua.txt
+    printf 'frames=3 Lua 5.4\n' > expected.txt
+    cmp -s expected.txt lua.txt || { echo "expected:" >&2; cat expected.txt >&2; echo "got:" >&2; cat lua.txt >&2; exit 1; }
+  - |
+    check() {
+      cmp -s "$1" "$2" || { echo "expected:" >&2; cat "$1" >&2; echo "got:" >&2; cat "$2" >&2; exit 1; }
+    }
+    editcap -r sample.pcap first2.pcapng 1-2
+    capinfos -T -r -c first2.pcapng > count.txt
+    printf 'first2.pcapng\t2\n' > expected.txt
+    check expected.txt count.txt
+    # Appended instead of merged by time, so one packet is out of order.
+    mergecap -a -w merged.pcapng sample.pcap first2.pcapng
+    reordercap merged.pcapng sorted.pcapng > reorder.txt
+    printf '5 frames, 1 out of order\n' > expected.txt
+    check expected.txt reorder.txt
+    capinfos -T -r -c -o merged.pcapng sorted.pcapng > order.txt
+    printf 'merged.pcapng\t5\tFalse\nsorted.pcapng\t5\tTrue\n' > expected.txt
+    check expected.txt order.txt
+    # A 28-byte ICMP echo request as a hex dump, given a dummy Ethernet header.
+    printf '%s\n' \
+      '0000  45 00 00 1c 00 01 40 00 40 01 26 de 0a 00 00 01' \
+      '0010  0a 00 00 02 08 00 e5 ca 12 34 00 01' > icmp.txt
+    text2pcap -q -e 0x800 icmp.txt icmp.pcapng
+    tshark -r icmp.pcapng -T fields -e ip.src -e ip.dst -e icmp.type -e icmp.seq > icmp-fields.txt
+    printf '10.0.0.1\t10.0.0.2\t8\t1\n' > expected.txt
+    check expected.txt icmp-fields.txt
+  - |
+    # Listing interfaces needs no privileges, unlike capturing on them.
+    dumpcap -D > dumpcap-interfaces.txt
+    grep -Eq '^[0-9]+\. lo( |$)' dumpcap-interfaces.txt || { cat dumpcap-interfaces.txt >&2; exit 1; }
+    tshark -D > tshark-interfaces.txt
+    grep -Eq '^[0-9]+\. lo( |$)' tshark-interfaces.txt || { cat tshark-interfaces.txt >&2; exit 1; }
+examples:
+  - title: Print the packets in a capture file
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/tshark -r capture.pcapng
+  - title: Print the DNS queries in a capture file as tab-separated fields
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/tshark -r capture.pcapng -Y 'dns.flags.response == 0' -T fields -e frame.time_epoch -e ip.src -e dns.qry.name
+  - title: List the IP conversations in a capture file
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/tshark -r capture.pcapng -q -z conv,ip
+  - title: Watch the traffic of a running container named web
+    command: docker run --rm --user 0 --cap-add NET_RAW --network container:web ghcr.io/randomcontainers/tshark -i eth0 -l
+combos:
+  - with: [tcpdump]
+    default: true
+    base: tshark
+    summary: TShark with tcpdump, for capturing and filtering with tcpdump and decoding with Wireshark's dissectors in one image.
+    test:
+      - |
+        # The same three packets as in the TShark tests: an ICMP echo request,
+        # a TCP SYN and a DNS query for example.org.
+        {
+          printf '\324\303\262\241\002\000\004\000\000\000\000\000\000\000\000\000\377\377\000\000'
+          printf '\001\000\000\000'
+          printf '\000\271\125\151\000\000\000\000\056\000\000\000\056\000\000\000'
+          printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+          printf '\105\000\000\040\000\001\100\000\100\001\046\332\012\000\000\001\012\000\000\002'
+          printf '\010\000\006\372\022\064\000\001\160\151\156\147'
+          printf '\001\271\125\151\000\000\000\000\066\000\000\000\066\000\000\000'
+          printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+          printf '\105\000\000\050\000\002\100\000\100\006\046\314\012\000\000\001\012\000\000\002'
+          printf '\234\100\000\120\000\000\003\350\000\000\000\000\120\002\372\360\000\167\000\000'
+          printf '\002\271\125\151\000\000\000\000\107\000\000\000\107\000\000\000'
+          printf '\002\000\000\000\000\002\002\000\000\000\000\001\010\000'
+          printf '\105\000\000\071\000\003\100\000\100\021\046\257\012\000\000\001\012\000\000\002'
+          printf '\317\010\000\065\000\045\067\274\022\064\001\000\000\001\000\000\000\000\000\000'
+          printf '\007\145\170\141\155\160\154\145\003\157\162\147\000\000\001\000\001'
+        } > sample.pcap
+        # tcpdump keeps only the DNS query, and capinfos reads the file it wrote.
+        tcpdump -r sample.pcap -w dns.pcap 'udp port 53'
+        capinfos -T -r -c dns.pcap > count.txt
+        printf 'dns.pcap\t1\n' > expected.txt
+        cmp -s expected.txt count.txt || { echo "expected:" >&2; cat expected.txt >&2; echo "got:" >&2; cat count.txt >&2; exit 1; }
+      - |
+        # tcpdump filters the capture and TShark decodes what it writes.
+        tcpdump -r sample.pcap -w - 'udp port 53' | tshark -r - -T fields -e dns.qry.name > names.txt
+        printf 'example.org\n' > expected.txt
+        cmp -s expected.txt names.txt || { echo "expected:" >&2; cat expected.txt >&2; echo "got:" >&2; cat names.txt >&2; exit 1; }
