@@ -19,7 +19,7 @@ upstream:
   # tarball's Last-Modified header is the release date.
   pattern: 'href="wireshark-(\d+\.\d*[02468]\.\d+)\.tar\.xz"'
   versioning: semver
-  version: 4.6.9
+  version: 4.6.10
   artifact:
     url: https://www.wireshark.org/download/src/all-versions/wireshark-{version}.tar.xz
     # SIGNATURES is a clearsigned list of hashes; Wireshark signs no tarball
@@ -28,7 +28,7 @@ upstream:
       url: https://www.wireshark.org/download/src/all-versions/SIGNATURES-{version}.txt
       algorithm: sha256
     signature: https://www.wireshark.org/download/src/all-versions/SIGNATURES-{version}.txt
-    sha256: d062d416a1ab3a49975aafe3a671c882dde0562ccd71b078808ceb59d465fc0f
+    sha256: 268f41bdf8acee561b670217cf6ea74cf9e779477543e59f92f1cd00294a03dd
 image:
   entrypoint: [tshark]
   cmd: [--help]
